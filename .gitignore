@@ -1,0 +1,12 @@
+.classpath
+.project
+.settings
+bin
+lib
+tmp
+eclipse
+logs
+*~
+*.orig
+*.local
+*.DS_Store
