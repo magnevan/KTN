@@ -2,7 +2,6 @@
 .project
 .settings
 bin
-lib
 tmp
 eclipse
 logs
