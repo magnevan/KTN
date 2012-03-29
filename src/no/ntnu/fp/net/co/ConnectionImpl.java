@@ -12,7 +12,7 @@ import java.net.UnknownHostException;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
-
+import java.util.Timer;
 
 import no.ntnu.fp.net.admin.Log;
 import no.ntnu.fp.net.cl.ClException;
@@ -29,7 +29,7 @@ import no.ntnu.fp.net.cl.KtnDatagram.Flag;
  * of the functionality, leaving message passing and error handling to this
  * implementation.
  * 
- * @author Sebjørn Birkeland and Stein Jakob Nordbø
+ * @author Sebjï¿½rn Birkeland and Stein Jakob Nordbï¿½
  * @see no.ntnu.fp.net.co.Connection
  * @see no.ntnu.fp.net.cl.ClSocket
  */
@@ -37,7 +37,7 @@ public class ConnectionImpl extends AbstractConnection {
 
     /** Keeps track of the used ports for each server port. */
     private static Map<Integer, Boolean> usedPorts = Collections.synchronizedMap(new HashMap<Integer, Boolean>());
-
+    
     /**
      * Initialise initial sequence number and setup state machine.
      * 
@@ -45,7 +45,9 @@ public class ConnectionImpl extends AbstractConnection {
      *            - the local port to associate with this connection
      */
     public ConnectionImpl(int myPort) {
-        throw new UnsupportedOperationException();
+    	super();
+    	this.myPort = myPort;
+    	myAddress = getIPv4Address();
     }
 
     private String getIPv4Address() {
@@ -72,7 +74,47 @@ public class ConnectionImpl extends AbstractConnection {
      */
     public void connect(InetAddress remoteAddress, int remotePort) throws IOException,
             SocketTimeoutException {
-        throw new UnsupportedOperationException();
+    	
+    	state = State.CLOSED;
+    	
+    	// Store remote parameters
+    	this.remoteAddress = remoteAddress.getHostAddress();
+    	this.remotePort = remotePort;
+    	
+    	KtnDatagram syn, synack = null;
+	
+    	// Create SYN packet and send it off
+    	syn = constructInternalPacket(Flag.SYN);
+    	state = State.SYN_SENT;
+        Timer timer = new Timer();
+        timer.scheduleAtFixedRate(new SendTimer(new ClSocket(), syn), 0, RETRANSMIT);
+    	
+        long start = System.currentTimeMillis();
+        while(synack == null && (System.currentTimeMillis()-start) < TIMEOUT) {
+        	synack = receivePacket(true);
+        	if(synack != null && (synack.getFlag() != Flag.SYN_ACK || synack.getAck() != syn.getSeq_nr()))
+        		synack = null;
+        }
+    	timer.cancel();
+    	
+    	// No ACK received within timeout
+    	if(synack == null)
+    		throw new SocketTimeoutException("Connection timed out");
+    	
+    	// ACK the SYN_ACK
+    	sendAck(synack, false);
+    	
+    	// Continue to receive, if we get duplicate SYN_ACKS then re-ACK
+    	start = System.currentTimeMillis();
+        while((System.currentTimeMillis()-start) < TIMEOUT) {
+        	synack = receivePacket(true);
+        	// TODO what if we get a FIN here?
+        	if(synack != null && (synack.getFlag() == Flag.SYN_ACK))
+        		sendAck(synack, false);
+        }
+    	timer.cancel();
+    	
+    	state = State.ESTABLISHED;
     }
 
     /**
@@ -82,7 +124,57 @@ public class ConnectionImpl extends AbstractConnection {
      * @see Connection#accept()
      */
     public Connection accept() throws IOException, SocketTimeoutException {
-        throw new UnsupportedOperationException();
+    	
+    	KtnDatagram syn = null, ack = null;
+    	
+    	state = State.LISTEN;
+    	
+    	// Keep listening till we got a SYN packet
+    	while(syn == null) {
+    		syn = receivePacket(true);
+    		
+    		if(syn != null && syn.getFlag() != Flag.SYN) {
+    			System.err.println("Dropped internal non-SYN packet in accept!!");
+    			syn = null;
+    		}
+    	}
+    	
+    	state = State.SYN_RCVD;
+    	remoteAddress = syn.getSrc_addr();
+    	remotePort = syn.getSrc_port();
+    	
+    	// SYN_ACK the SYN
+    	KtnDatagram synack = constructInternalPacket(Flag.SYN_ACK);
+    	synack.setAck(syn.getSeq_nr());
+        Timer timer = new Timer();
+        timer.scheduleAtFixedRate(new SendTimer(new ClSocket(), synack), 0, RETRANSMIT);
+    
+        // Read ack
+        long start = System.currentTimeMillis();
+        while(ack == null && (System.currentTimeMillis()-start) < TIMEOUT) {
+        	ack = receivePacket(true);
+        	if(ack != null && (ack.getFlag() != Flag.ACK || ack.getAck() != synack.getSeq_nr()))
+        		ack = null;
+        }
+    	timer.cancel();
+    	
+    	if(ack == null)
+    		throw new SocketTimeoutException("Destination timed out");
+
+    	// Construct new connection to handle the client
+    	ConnectionImpl c = new ConnectionImpl(myPort);
+    	c.myAddress = myAddress;
+    	c.remoteAddress = remoteAddress;
+    	c.remotePort = remotePort;
+    	c.state = State.ESTABLISHED;
+    	
+    	// Reset this connection object
+    	remoteAddress = null;
+    	remotePort = 0;    	
+    	state = State.CLOSED;
+    	
+    	return c;
+    	
     }
 
     /**
@@ -98,7 +190,25 @@ public class ConnectionImpl extends AbstractConnection {
      * @see no.ntnu.fp.net.co.Connection#send(String)
      */
     public void send(String msg) throws ConnectException, IOException {
-        throw new UnsupportedOperationException();
+    	
+    	if(state != State.ESTABLISHED)
+    		throw new ConnectException("No connection");
+    	
+    	KtnDatagram data, ack = null;
+    	
+    	// Construct data packet
+    	data = constructDataPacket(msg);
+    	
+    	ack = sendDataPacketWithRetransmit(data);
+    	
+    	// TODO Handle this better
+    	if(ack == null)
+    		throw new IOException("No ACK received");
+    	if(ack.getAck() != data.getSeq_nr())
+    		throw new IOException("Wrong ACK received");
+    	
+    	// Data has been sent
+    	
     }
 
     /**
@@ -110,16 +220,109 @@ public class ConnectionImpl extends AbstractConnection {
      * @see AbstractConnection#sendAck(KtnDatagram, boolean)
      */
     public String receive() throws ConnectException, IOException {
-        throw new UnsupportedOperationException();
+    	try {
+	    	KtnDatagram data = null;
+	    	
+	    	// Receive data, this will block until there is actual valid data
+	    	// TODO does not handle out of order packets
+	    	while(data == null) {
+	    		data = receivePacket(false);
+	    		if(!isValid(data))
+	    			data = null;
+	    	}
+	    	
+	    	// ACK the packet and we're done
+	    	sendAck(data, false);
+	    	
+	    	return (String) data.getPayload();
+    	} catch(EOFException e) {
+    		// TODO No idea what to use here, but we have to change for close to work
+    		state = State.FIN_WAIT_2;
+    		close();
+    	}
+    	return null;
     }
 
     /**
      * Close the connection.
      * 
+     * @TODO There are more states that needs to be visited here
+     * 
      * @see Connection#close()
      */
-    public void close() throws IOException {
-        throw new UnsupportedOperationException();
+    public void close() throws IOException {  	
+    	KtnDatagram fin, ack = null;
+    	long start;
+    	
+    	// We're initializing the tear-down
+    	if(state == State.ESTABLISHED) {
+    		fin = constructInternalPacket(Flag.FIN);
+		
+			// SYN_ACK the SYN
+	        Timer timer = new Timer();
+	        timer.scheduleAtFixedRate(new SendTimer(new ClSocket(), fin), 0, RETRANSMIT);
+	    
+	        // Read ACK
+	        start = System.currentTimeMillis();
+	        while(ack == null && (System.currentTimeMillis()-start) < TIMEOUT) {
+	        	ack = receivePacket(true);
+	        	if(ack != null && (ack.getFlag() != Flag.ACK || ack.getAck() != fin.getSeq_nr()))
+	        		ack = null;
+	        }
+	    	timer.cancel();
+			
+			if(ack == null)
+				throw new IOException("FIN was not ACK-ed, desination is gone");
+			
+			state = State.FIN_WAIT_1;
+			
+			fin = null;
+			start = System.currentTimeMillis();
+	        while(fin == null && (System.currentTimeMillis()-start) < TIMEOUT) {
+				fin = receivePacket(true);
+				if(fin != null && fin.getFlag() != Flag.FIN)
+					fin = null;
+			}
+
+			if(fin == null)
+				throw new IOException("Got no response FIN");
+	        
+			disconnectRequest = fin;
+			disconnectSeqNo = fin.getSeq_nr();
+	    	sendAck(disconnectRequest, false);
+	    	
+	    // Receiving side
+    	} else {
+
+	    	sendAck(disconnectRequest, false);
+	    	fin = constructInternalPacket(Flag.FIN);
+	    	
+	        Timer timer = new Timer();
+	        timer.scheduleAtFixedRate(new SendTimer(new ClSocket(), fin), 0, RETRANSMIT);
+	    	
+	    	ack = null;
+			start = System.currentTimeMillis();
+	    	while(ack == null && (System.currentTimeMillis()-start) < TIMEOUT) {
+				ack = receivePacket(true);
+				if(ack != null) {
+					// Duplicate FIN, re-ACK
+					if(ack.getFlag() == Flag.FIN) {
+						sendAck(disconnectRequest, false);
+						
+					// Fianl fin ACK-ed
+					} else if(ack.getFlag() == Flag.ACK && ack.getAck() == fin.getSeq_nr()) {
+						timer.cancel();
+						break;
+					}
+					ack = null;
+				}	
+			}
+    		
+    	}
+    	    	
+    	state = State.CLOSED;
+    	remoteAddress = null;
+    	remotePort = 0;
     }
 
     /**
@@ -131,6 +334,8 @@ public class ConnectionImpl extends AbstractConnection {
      * @return true if packet is free of errors, false otherwise.
      */
     protected boolean isValid(KtnDatagram packet) {
-        throw new UnsupportedOperationException();
+    	return packet.getDest_addr().equals(myAddress) 
+    			&& packet.getDest_port() == myPort
+    			&& packet.getChecksum() == packet.calculateChecksum(); 
     }
 }
