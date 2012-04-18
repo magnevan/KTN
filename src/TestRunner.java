@@ -72,7 +72,6 @@ public class TestRunner extends Thread {
 			server.join();client.join();
 			if(client.receivedString.equals(s)) {
 				System.err.println("\n\nMATCH\n\n");
-				System.exit(1);
 			} else {
 				System.exit(1);
 				System.out.println("Missmatch");

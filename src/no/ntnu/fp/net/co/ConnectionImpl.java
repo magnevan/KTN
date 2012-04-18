@@ -336,6 +336,9 @@ public class ConnectionImpl extends AbstractConnection {
 	    	
 	    	return (String) data.getPayload();
     	} catch(EOFException e) {
+    		System.out.println(disconnectRequest.getSeq_nr());
+    		next_seq_nr++; // Packet not read by readPacket(), make sure sequence number is incremented
+    		System.out.println(next_seq_nr);
     		state = State.CLOSE_WAIT;
     		close();
     	}
