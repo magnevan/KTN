@@ -25,6 +25,7 @@ class Server extends Thread {
 			//System.out.println(socket);
 			
 			String str = socket.receive();
+			socket.receive();
 			//System.out.println("SERVER: Got from client: '"+str+"'");
 			
 			//System.out.println("SERVER: Sent to client: 'Server response'");

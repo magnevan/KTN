@@ -40,6 +40,8 @@ public class ConnectionImpl extends AbstractConnection {
     
     private int next_seq_nr = -1;
     
+    private KtnDatagram lastSentAck = null;
+    
     /**
      * Initialise initial sequence number and setup state machine.
      * 
@@ -82,13 +84,14 @@ public class ConnectionImpl extends AbstractConnection {
     public void connect(InetAddress remoteAddress, int remotePort) throws IOException,
             SocketTimeoutException {
     	
+    	nextSequenceNo = 1;
     	state = State.CLOSED;
     	
     	// Store remote parameters
     	this.remoteAddress = remoteAddress.getHostAddress();
     	this.remotePort = remotePort;
     	
-    	KtnDatagram syn, synack = null;
+    	KtnDatagram ack, syn, synack = null;
 	
     	// Create SYN packet and send it off
     	syn = constructInternalPacket(Flag.SYN);
@@ -109,7 +112,10 @@ public class ConnectionImpl extends AbstractConnection {
     		throw new SocketTimeoutException("Connection timed out");
     	
     	// ACK the SYN_ACK
-    	sendAck(synack, false);
+    	ack = constructInternalPacket(Flag.ACK);
+    	ack.setAck(synack.getSeq_nr());
+    	lastSentAck = ack;
+    	send(ack);
     	
     	state = State.ESTABLISHED;
     	System.err.println("CLIENT: Esablished");
@@ -125,33 +131,69 @@ public class ConnectionImpl extends AbstractConnection {
      */
     @Override
     protected KtnDatagram receivePacket(boolean internal) throws IOException, ConnectException {
+    	System.out.println("receivePacket()");
     	KtnDatagram packet = super.receivePacket(internal);
     	
     	if(packet != null) {
+    		System.out.println(packet.getSeq_nr() + " " + packet.getFlag());
     		// First packet, store new seq number
 	    	if(next_seq_nr == -1) {
 	    		next_seq_nr = packet.getSeq_nr(); 
 	    	}
     	
     		// If its a old packet we'll re-ACK and null it
-	    	else if(next_seq_nr > packet.getSeq_nr()) {
-	    		if(packet.getFlag() != Flag.ACK) {
-	    			sendAck(packet, (packet.getFlag() == Flag.SYN));
+	    	else if(next_seq_nr != packet.getSeq_nr()) {
+	    		if(lastSentAck != null && lastSentAck.getAck() == packet.getSeq_nr()) {
+	    			send(lastSentAck);
 	    		}
+	    		System.out.println("Dropped packet due to bad seq nr expected "+next_seq_nr + " got "+packet.getSeq_nr());
 	    		packet = null;
 	    	}
     	}
     	
     	if(!internal && packet != null) {
     		// Null invalid data packets
-    		if(!isValid(packet)) 
+    		if(!isValid(packet)) {
+    			System.out.println("Invalid data packet!");
     			packet = null;
+    		}
     	}
     	
     	if(packet != null)
     		next_seq_nr++;
     	
     	return packet;    	
+    }
+    
+    /**
+     * Simply send packet
+     * 
+     * @param packet
+     * @throws IOException
+     */
+    protected void send(KtnDatagram packet) throws IOException {
+		boolean sent = false;
+		int tries = 3;
+		do {
+            try {
+                new ClSocket().send(packet);
+                sent = true;
+            }
+            catch (ClException e) {
+                Log.writeToLog(packet, "CLException: Could not establish a "
+                        + "connection to the specified address/port!", "AbstractConnection");
+            }
+            catch (ConnectException e) {
+                // Silently ignore: Maybe recipient was processing and didn't
+                // manage to call receiveAck() before we were ready to send.
+                try {
+                    Thread.sleep(100);
+                }
+                catch (InterruptedException ex) {
+                }
+            }
+        }
+        while (!sent && (tries-- > 0));
     }
 
     /**
@@ -161,6 +203,7 @@ public class ConnectionImpl extends AbstractConnection {
      * @see Connection#accept()
      */
     public Connection accept() throws IOException, SocketTimeoutException {
+    	nextSequenceNo = 100;
     	
     	KtnDatagram syn = null, ack = null;
     	
@@ -206,6 +249,7 @@ public class ConnectionImpl extends AbstractConnection {
     	c.remoteAddress = remoteAddress;
     	c.remotePort = remotePort;
     	c.state = State.ESTABLISHED;
+    	c.nextSequenceNo = nextSequenceNo;
     	
     	// Reset this connection object
     	remoteAddress = null;
@@ -230,7 +274,6 @@ public class ConnectionImpl extends AbstractConnection {
      * @see no.ntnu.fp.net.co.Connection#send(String)
      */
     public void send(String msg) throws ConnectException, IOException {
-    	
     	if(state != State.ESTABLISHED)
     		throw new ConnectException("No connection");
     	
@@ -239,16 +282,24 @@ public class ConnectionImpl extends AbstractConnection {
     	// Construct data packet
     	data = constructDataPacket(msg);
     	
-    	ack = sendDataPacketWithRetransmit(data);
+    	// Send data
+        Timer timer = new Timer();
+        timer.scheduleAtFixedRate(new SendTimer(new ClSocket(), data), 0, RETRANSMIT);
+    
+        // Read ACK
+        long start = System.currentTimeMillis();
+        while(ack == null && (System.currentTimeMillis()-start) < TIMEOUT) {
+        	ack = receivePacket(true);
+        	if(ack != null && (ack.getFlag() != Flag.ACK || ack.getAck() != data.getSeq_nr())) {
+        		System.out.println("Dropped packet "+ack);
+        		ack = null;
+        	}
+        }
+    	timer.cancel();
     	
     	// TODO Handle this better
     	if(ack == null)
-    		throw new IOException("No ACK received");
-    	if(ack.getAck() != data.getSeq_nr())
-    		throw new IOException("Wrong ACK received expected: "+data.getSeq_nr()+" got: "+ack.getAck());
-    	
-    	// Data has been sent
-    	
+    		throw new IOException("No ACK received");    	
     }
 
     /**
@@ -261,18 +312,21 @@ public class ConnectionImpl extends AbstractConnection {
      */
     public String receive() throws ConnectException, IOException {
     	try {
-	    	KtnDatagram data = null;
+	    	KtnDatagram ack, data = null;
 	    	
 	    	while(data == null) {
 	    		data = receivePacket(false);
-	    		if(!isValid(data)) {
+	    		if(data != null && !isValid(data)) {
 	    			System.err.println("Invalid data packet");
 	    			data = null;
 	    		}
 	    	}
 	    	
 	    	// ACK the packet and we're done
-	    	sendAck(data, false);
+	    	ack = constructInternalPacket(Flag.ACK);
+	    	ack.setAck(data.getSeq_nr());
+	    	lastSentAck = ack;
+	    	send(ack);
 	    	
 	    	return (String) data.getPayload();
     	} catch(EOFException e) {
@@ -306,9 +360,12 @@ public class ConnectionImpl extends AbstractConnection {
 	        // Read ACK
 	        start = System.currentTimeMillis();
 	        while(ack == null && (System.currentTimeMillis()-start) < TIMEOUT) {
+	        	//System.out.println(ack);
 	        	ack = receivePacket(true);
-	        	if(ack != null && (ack.getFlag() != Flag.ACK || ack.getAck() != fin.getSeq_nr()))
+	        	if(ack != null && (ack.getFlag() != Flag.ACK || ack.getAck() != fin.getSeq_nr())) {
+	        		System.out.println("Dropped packet "+ack);
 	        		ack = null;
+	        	}
 	        }
 	    	timer.cancel();
 			
@@ -316,37 +373,41 @@ public class ConnectionImpl extends AbstractConnection {
 				throw new IOException("FIN was not ACK-ed, desination is gone");
 			
 			state = State.FIN_WAIT_2;
+			System.out.println("State changed FIN_WAIT_2");
 			
 			fin = null;
 			start = System.currentTimeMillis();
-	        while(fin == null && (System.currentTimeMillis()-start) < TIMEOUT) {
+	        while(fin == null && (System.currentTimeMillis()-start) < 4*TIMEOUT) {
 				fin = receivePacket(true);
-				if(fin != null && fin.getFlag() != Flag.FIN)
+				if(fin != null && fin.getFlag() != Flag.FIN) {
+					System.out.println("FIN_WAIT_2: dropped non FIN packet");
 					fin = null;
+				}
 			}
 
 			if(fin == null)
 				throw new IOException("Got no response FIN");
 	        
 			disconnectRequest = fin;
-			disconnectSeqNo = fin.getSeq_nr();
-	    	sendAck(disconnectRequest, false);
+
+	    	state = State.TIME_WAIT;
 	    	
-	    	state = State.TIME_WAIT;	    	
+	    	System.out.println("State changed TIME_WAIT");
 	    	
     	}
     	
+    	disconnectSeqNo = disconnectRequest.getSeq_nr();
+    	ack = constructInternalPacket(Flag.ACK);
+		ack.setAck(disconnectSeqNo);
+		lastSentAck = ack;
+    	send(ack);    	
+    	
     	fin = null;
 		start = System.currentTimeMillis();
-        while(fin == null && (System.currentTimeMillis()-start) < TIMEOUT) {
+        while((System.currentTimeMillis()-start) < TIMEOUT) {
 			fin = receivePacket(true);
-			if(fin != null && fin.getFlag() == Flag.FIN) {
-		    	sendAck(disconnectRequest, false);
-		    	fin = null;
-			}
 		}
     	
-	    // Receiving side
     	if(state == State.CLOSE_WAIT) {
 
 	    	fin = constructInternalPacket(Flag.FIN);
@@ -360,15 +421,15 @@ public class ConnectionImpl extends AbstractConnection {
 			start = System.currentTimeMillis();
 	    	while(ack == null && (System.currentTimeMillis()-start) < TIMEOUT) {
 				ack = receivePacket(true);
-				if(ack != null && ack.getFlag() == Flag.ACK && ack.getAck() == fin.getSeq_nr()) {
-					timer.cancel();
-					break;
-				}
+				if(ack != null && ack.getFlag() == Flag.ACK && ack.getAck() == fin.getSeq_nr()) 
+					break;				
 				ack = null;	
 			}
+	    	timer.cancel();
     		
     	}
     	    	
+    	System.out.println("State changed CLOSED");
     	state = State.CLOSED;
     	remoteAddress = null;
     	remotePort = 0;
