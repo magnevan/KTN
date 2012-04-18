@@ -9,7 +9,7 @@ import no.ntnu.fp.net.co.ConnectionImpl;
 public class ServerRunner {
 	public static void main(String[] args) {
 		no.ntnu.fp.net.cl.FailureController.setError(false);
-		no.ntnu.fp.net.cl.FailureController.setLoss_prob(0.5);
+		//no.ntnu.fp.net.cl.FailureController.setLoss_prob(0.5);
 		new Server().start();
 	}
 }
@@ -22,15 +22,15 @@ class Server extends Thread {
 		try {
 			Connection socket = ss.accept();
 		
-			System.out.println(socket);
+			//System.out.println(socket);
 			
 			String str = socket.receive();
-			System.out.println("SERVER: Got from client: '"+str+"'");
+			//System.out.println("SERVER: Got from client: '"+str+"'");
 			
-			System.out.println("SERVER: Sent to client: 'Server response'");
-			socket.send("Server response");
+			//System.out.println("SERVER: Sent to client: 'Server response'");
+			//socket.send("Server response");
 			
-			socket.close();
+			//socket.close();
 			
 		} catch(ConnectException ex) {
 			System.out.println("SERVER: No connection");

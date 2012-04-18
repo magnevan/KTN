@@ -129,8 +129,9 @@ public class ConnectionImpl extends AbstractConnection {
     	
     	if(packet != null) {
     		// First packet, store new seq number
-	    	if(next_seq_nr == -1)
-	    		next_seq_nr = packet.getSeq_nr()+1;
+	    	if(next_seq_nr == -1) {
+	    		next_seq_nr = packet.getSeq_nr(); 
+	    	}
     	
     		// If its a old packet we'll re-ACK and null it
 	    	else if(next_seq_nr > packet.getSeq_nr()) {
@@ -189,8 +190,10 @@ public class ConnectionImpl extends AbstractConnection {
         long start = System.currentTimeMillis();
         while(ack == null && (System.currentTimeMillis()-start) < TIMEOUT) {
         	ack = receivePacket(true);
-        	if(ack != null && (ack.getFlag() != Flag.ACK || ack.getAck() != synack.getSeq_nr()))
+        	if(ack != null && (ack.getFlag() != Flag.ACK || ack.getAck() != synack.getSeq_nr())) {
+        		System.out.println("dropped non ack");
         		ack = null;
+        	}
         }
     	timer.cancel();
     	
@@ -260,8 +263,6 @@ public class ConnectionImpl extends AbstractConnection {
     	try {
 	    	KtnDatagram data = null;
 	    	
-	    	// Receive data, this will block until there is actual valid data
-	    	// TODO does not handle out of order packets
 	    	while(data == null) {
 	    		data = receivePacket(false);
 	    		if(!isValid(data)) {
@@ -275,8 +276,7 @@ public class ConnectionImpl extends AbstractConnection {
 	    	
 	    	return (String) data.getPayload();
     	} catch(EOFException e) {
-    		// TODO No idea what to use here, but we have to change for close to work
-    		state = State.FIN_WAIT_2;
+    		state = State.CLOSE_WAIT;
     		close();
     	}
     	return null;
@@ -296,7 +296,9 @@ public class ConnectionImpl extends AbstractConnection {
     	// We're initializing the tear-down
     	if(state == State.ESTABLISHED) {
     		fin = constructInternalPacket(Flag.FIN);
-		
+
+			state = State.FIN_WAIT_1;
+			
 			// SYN_ACK the SYN
 	        Timer timer = new Timer();
 	        timer.scheduleAtFixedRate(new SendTimer(new ClSocket(), fin), 0, RETRANSMIT);
@@ -313,7 +315,7 @@ public class ConnectionImpl extends AbstractConnection {
 			if(ack == null)
 				throw new IOException("FIN was not ACK-ed, desination is gone");
 			
-			state = State.FIN_WAIT_1;
+			state = State.FIN_WAIT_2;
 			
 			fin = null;
 			start = System.currentTimeMillis();
@@ -330,11 +332,26 @@ public class ConnectionImpl extends AbstractConnection {
 			disconnectSeqNo = fin.getSeq_nr();
 	    	sendAck(disconnectRequest, false);
 	    	
+	    	state = State.TIME_WAIT;	    	
+	    	
+    	}
+    	
+    	fin = null;
+		start = System.currentTimeMillis();
+        while(fin == null && (System.currentTimeMillis()-start) < TIMEOUT) {
+			fin = receivePacket(true);
+			if(fin != null && fin.getFlag() == Flag.FIN) {
+		    	sendAck(disconnectRequest, false);
+		    	fin = null;
+			}
+		}
+    	
 	    // Receiving side
-    	} else {
+    	if(state == State.CLOSE_WAIT) {
 
-	    	sendAck(disconnectRequest, false);
 	    	fin = constructInternalPacket(Flag.FIN);
+	    	
+	    	state = State.LAST_ACK;
 	    	
 	        Timer timer = new Timer();
 	        timer.scheduleAtFixedRate(new SendTimer(new ClSocket(), fin), 0, RETRANSMIT);
@@ -343,18 +360,11 @@ public class ConnectionImpl extends AbstractConnection {
 			start = System.currentTimeMillis();
 	    	while(ack == null && (System.currentTimeMillis()-start) < TIMEOUT) {
 				ack = receivePacket(true);
-				if(ack != null) {
-					// Duplicate FIN, re-ACK
-					if(ack.getFlag() == Flag.FIN) {
-						sendAck(disconnectRequest, false);
-						
-					// Fianl fin ACK-ed
-					} else if(ack.getFlag() == Flag.ACK && ack.getAck() == fin.getSeq_nr()) {
-						timer.cancel();
-						break;
-					}
-					ack = null;
-				}	
+				if(ack != null && ack.getFlag() == Flag.ACK && ack.getAck() == fin.getSeq_nr()) {
+					timer.cancel();
+					break;
+				}
+				ack = null;	
 			}
     		
     	}
