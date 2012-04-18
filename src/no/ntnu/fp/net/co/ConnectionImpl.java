@@ -38,6 +38,8 @@ public class ConnectionImpl extends AbstractConnection {
     /** Keeps track of the used ports for each server port. */
     private static Map<Integer, Boolean> usedPorts = Collections.synchronizedMap(new HashMap<Integer, Boolean>());
     
+    private int next_seq_nr = -1;
+    
     /**
      * Initialise initial sequence number and setup state machine.
      * 
@@ -50,6 +52,11 @@ public class ConnectionImpl extends AbstractConnection {
     	myAddress = getIPv4Address();
     }
 
+    /**
+     * Get local ip address
+     * 
+     * @return
+     */
     private String getIPv4Address() {
         try {
             return InetAddress.getLocalHost().getHostAddress();
@@ -104,17 +111,46 @@ public class ConnectionImpl extends AbstractConnection {
     	// ACK the SYN_ACK
     	sendAck(synack, false);
     	
-    	// Continue to receive, if we get duplicate SYN_ACKS then re-ACK
-    	start = System.currentTimeMillis();
-        while((System.currentTimeMillis()-start) < TIMEOUT) {
-        	synack = receivePacket(true);
-        	// TODO what if we get a FIN here?
-        	if(synack != null && (synack.getFlag() == Flag.SYN_ACK))
-        		sendAck(synack, false);
-        }
-    	timer.cancel();
-    	
     	state = State.ESTABLISHED;
+    	System.err.println("CLIENT: Esablished");
+    }
+    
+    /**
+     * Receive a packet
+     * 
+     * If internal is true the return will be a packet received within the timeout
+     * or null if none was received. If internal is false it will block untill
+     * a valid data packet has been found
+     * 
+     */
+    @Override
+    protected KtnDatagram receivePacket(boolean internal) throws IOException, ConnectException {
+    	KtnDatagram packet = super.receivePacket(internal);
+    	
+    	if(packet != null) {
+    		// First packet, store new seq number
+	    	if(next_seq_nr == -1)
+	    		next_seq_nr = packet.getSeq_nr()+1;
+    	
+    		// If its a old packet we'll re-ACK and null it
+	    	else if(next_seq_nr > packet.getSeq_nr()) {
+	    		if(packet.getFlag() != Flag.ACK) {
+	    			sendAck(packet, (packet.getFlag() == Flag.SYN));
+	    		}
+	    		packet = null;
+	    	}
+    	}
+    	
+    	if(!internal && packet != null) {
+    		// Null invalid data packets
+    		if(!isValid(packet)) 
+    			packet = null;
+    	}
+    	
+    	if(packet != null)
+    		next_seq_nr++;
+    	
+    	return packet;    	
     }
 
     /**
@@ -129,12 +165,12 @@ public class ConnectionImpl extends AbstractConnection {
     	
     	state = State.LISTEN;
     	
-    	// Keep listening till we got a SYN packet
+    	// Keep listening till we get a SYN packet
     	while(syn == null) {
     		syn = receivePacket(true);
     		
     		if(syn != null && syn.getFlag() != Flag.SYN) {
-    			System.err.println("Dropped internal non-SYN packet in accept!!");
+    			System.err.println("Dropped internal non-SYN packet in accept");
     			syn = null;
     		}
     	}
@@ -173,6 +209,7 @@ public class ConnectionImpl extends AbstractConnection {
     	remotePort = 0;    	
     	state = State.CLOSED;
     	
+    	System.err.println("SERVER: New connection ESABLISHED, original CLOSED");
     	return c;
     	
     }
@@ -205,7 +242,7 @@ public class ConnectionImpl extends AbstractConnection {
     	if(ack == null)
     		throw new IOException("No ACK received");
     	if(ack.getAck() != data.getSeq_nr())
-    		throw new IOException("Wrong ACK received");
+    		throw new IOException("Wrong ACK received expected: "+data.getSeq_nr()+" got: "+ack.getAck());
     	
     	// Data has been sent
     	
@@ -227,8 +264,10 @@ public class ConnectionImpl extends AbstractConnection {
 	    	// TODO does not handle out of order packets
 	    	while(data == null) {
 	    		data = receivePacket(false);
-	    		if(!isValid(data))
+	    		if(!isValid(data)) {
+	    			System.err.println("Invalid data packet");
 	    			data = null;
+	    		}
 	    	}
 	    	
 	    	// ACK the packet and we're done
