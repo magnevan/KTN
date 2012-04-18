@@ -53,6 +53,12 @@ public class ConnectionImpl extends AbstractConnection {
     	this.myPort = myPort;
     	myAddress = getIPv4Address();
     }
+    
+    public ConnectionImpl(int myPort, String host) {
+    	super();
+    	this.myPort = myPort;
+    	myAddress = host;
+    }
 
     /**
      * Get local ip address

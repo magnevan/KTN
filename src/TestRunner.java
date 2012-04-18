@@ -8,6 +8,7 @@ import no.ntnu.fp.net.co.ConnectionImpl;
 public class TestRunner extends Thread {
 
 	private final int myPort, port;
+	private final String myHost, host;
 	private final boolean listen;
 	private final String payload;
 	public Exception exception = null;
@@ -18,17 +19,21 @@ public class TestRunner extends Thread {
 	 * @param myPort
 	 * @param payload
 	 */
-	public TestRunner(int myPort, String payload) {
+	public TestRunner(int myPort, String myHost, String payload) {
 		this.myPort = myPort;
+		this.myHost = myHost;
 		this.port = -1;
+		this.host = null;
 		this.listen = true;
 		this.payload = payload;
 		
 	}
 	
-	public TestRunner(int myPort, int port) {
+	public TestRunner(int myPort, String myHost, int port, String host) {
 		this.myPort = myPort;
+		this.myHost = myHost;
 		this.port = port;
+		this.host = host;
 		this.listen = false;
 		this.payload = null;
 	}
@@ -36,15 +41,15 @@ public class TestRunner extends Thread {
 	public void run() {
 		try {
 			if(listen) {			
-				Connection ss = new ConnectionImpl(myPort);			
+				Connection ss = new ConnectionImpl(myPort, myHost);	
 				Connection client = ss.accept();
 				
 				client.send(payload);
 				client.close();
 				ss = client = null;
 			} else {
-				Connection c = new ConnectionImpl(myPort);
-				c.connect(InetAddress.getLocalHost(), port);
+				Connection c = new ConnectionImpl(myPort, myHost);
+				c.connect(InetAddress.getByName(host), port);
 				
 				receivedString = c.receive();
 				c.receive(); // Trigger EOF -> close()
@@ -60,8 +65,8 @@ public class TestRunner extends Thread {
 		TestRunner server, client;
 		
 		for(String s : testData) {
-			server = new TestRunner(8001, s);
-			client = new TestRunner(8000, 8001);
+			server = new TestRunner(8001, "127.0.0.1", s);
+			client = new TestRunner(8000, "127.0.0.1", 8001, "127.0.0.1");
 			server.start();client.start();
 			
 			server.join();client.join();

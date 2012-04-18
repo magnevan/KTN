@@ -24,10 +24,10 @@ class Client extends Thread {
 	
 	@Override
 	public void run() {
-		Connection socket = new ConnectionImpl(8001);
+		Connection socket = new ConnectionImpl(8001, "127.0.0.1");
 		
 		try {
-			socket.connect(InetAddress.getLocalHost(), 8002);
+			socket.connect(InetAddress.getByName("127.0.0.1"), 8002);
 		
 			//System.out.println("CLIENT: Sent to server: 'THIS IS THE MESSAGE!'");
 			socket.send("THIS IS THE MESSAGE!");

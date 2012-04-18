@@ -18,7 +18,7 @@ class Server extends Thread {
 	
 	@Override
 	public void run() {
-		Connection ss = new ConnectionImpl(8002);		
+		Connection ss = new ConnectionImpl(8002, "127.0.0.1");		
 		try {
 			Connection socket = ss.accept();
 		
