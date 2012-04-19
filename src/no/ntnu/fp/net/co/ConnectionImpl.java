@@ -7,6 +7,7 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.net.ConnectException;
 import java.net.InetAddress;
+import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.util.Collections;
@@ -197,6 +198,14 @@ public class ConnectionImpl extends AbstractConnection {
                 }
                 catch (InterruptedException ex) {
                 }
+            } catch(SocketException e) {
+            	 // Silently ignore: Maybe recipient was processing and didn't
+                // manage to call receiveAck() before we were ready to send.
+                try {
+                    Thread.sleep(100);
+                }
+                catch (InterruptedException ex) {
+                }
             }
         }
         while (!sent && (tries-- > 0));
@@ -261,6 +270,7 @@ public class ConnectionImpl extends AbstractConnection {
     	remoteAddress = null;
     	remotePort = 0;    	
     	state = State.CLOSED;
+    	next_seq_nr = -1;
     	
     	System.err.println("SERVER: New connection ESABLISHED, original CLOSED");
     	return c;
@@ -293,15 +303,23 @@ public class ConnectionImpl extends AbstractConnection {
         timer.scheduleAtFixedRate(new SendTimer(new ClSocket(), data), 0, RETRANSMIT);
     
         // Read ACK
-        long start = System.currentTimeMillis();
-        while(ack == null && (System.currentTimeMillis()-start) < TIMEOUT) {
-        	ack = receivePacket(true);
-        	if(ack != null && (ack.getFlag() != Flag.ACK || ack.getAck() != data.getSeq_nr())) {
-        		System.out.println("Dropped packet "+ack);
-        		ack = null;
-        	}
+        try {
+	        long start = System.currentTimeMillis();
+	        while(ack == null && (System.currentTimeMillis()-start) < TIMEOUT) {
+	        	ack = receivePacket(true);
+	        	if(ack != null && (ack.getFlag() != Flag.ACK || ack.getAck() != data.getSeq_nr())) {
+	        		System.out.println("Dropped packet "+ack);
+	        		ack = null;
+	        	}
+	        }
+        } catch(EOFException e) {
+        	timer.cancel();
+        	next_seq_nr++;
+    		state = State.CLOSE_WAIT;
+    		close();
+        	throw new IOException("FIN received", e);
         }
-    	timer.cancel();
+        timer.cancel();
     	
     	// TODO Handle this better
     	if(ack == null)
@@ -336,9 +354,7 @@ public class ConnectionImpl extends AbstractConnection {
 	    	
 	    	return (String) data.getPayload();
     	} catch(EOFException e) {
-    		System.out.println(disconnectRequest.getSeq_nr());
     		next_seq_nr++; // Packet not read by readPacket(), make sure sequence number is incremented
-    		System.out.println(next_seq_nr);
     		state = State.CLOSE_WAIT;
     		close();
     	}

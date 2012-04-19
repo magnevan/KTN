@@ -18,14 +18,21 @@ class Server extends Thread {
 	
 	@Override
 	public void run() {
-		Connection ss = new ConnectionImpl(8002, "78.91.2.245");		
+		Connection ss = new ConnectionImpl(8002, "127.0.0.1");	
+		String[] data = new String[4];
 		try {
 			Connection socket = ss.accept();
-		
-			//System.out.println(socket);
-			
-			String str = socket.receive();
-			socket.receive();
+			try {
+				for(int i = 0; i < data.length; i++) {
+					data[i] = socket.receive();				
+				}
+				for(int i = 0; i < data.length; i++) {
+					socket.send(data[i]);
+				}
+			} catch(IOException e) {
+				System.err.println("Expected exception");
+				e.printStackTrace();
+			}
 			//System.out.println("SERVER: Got from client: '"+str+"'");
 			
 			//System.out.println("SERVER: Sent to client: 'Server response'");

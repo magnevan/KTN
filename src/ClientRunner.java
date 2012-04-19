@@ -24,31 +24,32 @@ class Client extends Thread {
 	
 	@Override
 	public void run() {
-		Connection socket = new ConnectionImpl(8001, "78.91.2.245");
-		
+		String[] data = new String[]{"Line one", "Line two", "Line three", "Line four"};
+		String[] rec = new String[data.length];
+
 		try {
-			socket.connect(InetAddress.getByName("78.91.81.161"), 8002);
-		
-			//System.out.println("CLIENT: Sent to server: 'THIS IS THE MESSAGE!'");
-			socket.send("THIS IS THE MESSAGE!");
-			
-			//String str = socket.receive();
-			//System.out.println("CLIENT: Got from server: '"+str+"'");
-			
-			//str = socket.receive();
-			
-			socket.close();
-			
-		} catch(ConnectException ex) {
-			System.out.println("CLIENT: No connection");
+			Connection socket = new ConnectionImpl(8001, "127.0.0.1");
+			socket.connect(InetAddress.getByName("127.0.0.1"), 8002);			
+			for(int i = 0; i < data.length; i++) {
+				socket.send(data[i]);	
+			}			
+			for(int i = 0; i < data.length; i++) {
+				rec[i] = socket.receive();
+			}			
+			socket.close();	
+		} catch(Exception ex) {
+			System.out.println("CLIENT: exception during transmission");
 			ex.printStackTrace();
-		} catch(SocketTimeoutException ex) {
-			System.out.println("CLIENT: Connection to server timedout");
-			ex.printStackTrace();
-		} catch(IOException ex) {
-			System.out.println("CLIENT: IOException during connection");
-			ex.printStackTrace();
+			System.exit(1);
 		}
+		for(int i = 0; i < data.length; i++) {
+			if(!data[i].equals(rec[i])) {
+				System.out.println("\n\nBad data, test failed");
+				System.exit(1);
+			}
+		}
+		System.out.println("\n\n\nTEST OK\n\n\n");
+		
 	}
 	
 }

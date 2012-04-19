@@ -70,7 +70,7 @@ public abstract class AbstractConnection implements Connection {
      * this queue when waiting for internal packets (e.g. ACK) and receiving a
      * data packet.
      */
-    private List<KtnDatagram> externalQueue;
+    protected List<KtnDatagram> externalQueue;
 
     /**
      * Identifies the state of the connection.
