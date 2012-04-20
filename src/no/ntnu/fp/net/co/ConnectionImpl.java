@@ -55,6 +55,12 @@ public class ConnectionImpl extends AbstractConnection {
     	myAddress = getIPv4Address();
     }
     
+    /**
+     * Initialize connection binding to a given host name/ip
+     * 
+     * @param myPort
+     * @param host
+     */
     public ConnectionImpl(int myPort, String host) {
     	super();
     	this.myPort = myPort;
@@ -91,16 +97,20 @@ public class ConnectionImpl extends AbstractConnection {
     public void connect(InetAddress remoteAddress, int remotePort) throws IOException,
             SocketTimeoutException {
     	
-    	nextSequenceNo = 1;
-    	state = State.CLOSED;
-    	
+    	// Check if port is in use and that we're 
+    	if(usedPorts.containsKey(myPort)) {
+    		throw new IOException("Port number in use");
+    	} else if(state != State.CLOSED) {
+    		throw new IOException("Connection already established");
+    	}
+    	    	
     	// Store remote parameters
     	this.remoteAddress = remoteAddress.getHostAddress();
     	this.remotePort = remotePort;
     	
     	KtnDatagram ack, syn, synack = null;
 	
-    	// Create SYN packet and send it off
+    	// Create SYN packet, send it off and wait a given time for the SYN_ACK
     	syn = constructInternalPacket(Flag.SYN);
     	state = State.SYN_SENT;
         Timer timer = new Timer();
@@ -115,8 +125,10 @@ public class ConnectionImpl extends AbstractConnection {
     	timer.cancel();
     	
     	// No ACK received within timeout
-    	if(synack == null)
+    	if(synack == null) {
+    		state = State.CLOSED;
     		throw new SocketTimeoutException("Connection timed out");
+    	}
     	
     	// ACK the SYN_ACK
     	ack = constructInternalPacket(Flag.ACK);
@@ -125,9 +137,282 @@ public class ConnectionImpl extends AbstractConnection {
     	send(ack);
     	
     	state = State.ESTABLISHED;
-    	System.err.println("CLIENT: Esablished");
+    	//System.err.println("CLIENT: Esablished");
     }
     
+    /**
+     * Listen for, and accept, incoming connections.
+     * 
+     * @return A new ConnectionImpl-object representing the new connection.
+     * @see Connection#accept()
+     */
+    public Connection accept() throws IOException, SocketTimeoutException {
+    	nextSequenceNo = 100;
+    	
+    	KtnDatagram syn = null, ack = null;
+    	
+    	state = State.LISTEN;
+    	
+    	// Keep listening till we get a SYN packet
+    	while(syn == null) {
+    		syn = receivePacket(true);
+    		
+    		if(syn != null && syn.getFlag() != Flag.SYN) {
+    			System.err.println("Dropped internal non-SYN packet in accept");
+    			syn = null;
+    		}
+    	}
+    	
+    	state = State.SYN_RCVD;
+    	remoteAddress = syn.getSrc_addr();
+    	remotePort = syn.getSrc_port();
+    	
+    	// SYN_ACK the SYN
+    	KtnDatagram synack = constructInternalPacket(Flag.SYN_ACK);
+    	synack.setAck(syn.getSeq_nr());
+        Timer timer = new Timer();
+        timer.scheduleAtFixedRate(new SendTimer(new ClSocket(), synack), 0, RETRANSMIT);
+    
+        // Read ACK
+        long start = System.currentTimeMillis();
+        while(ack == null && (System.currentTimeMillis()-start) < TIMEOUT) {
+        	ack = receivePacket(true);
+        	if(ack != null && (ack.getFlag() != Flag.ACK || ack.getAck() != synack.getSeq_nr())) {
+        		ack = null;
+        	}
+        }
+    	timer.cancel();
+    	
+    	if(ack == null) {
+    		state = State.CLOSED;
+    		throw new SocketTimeoutException("Destination timed out");
+    	}
+
+    	// Construct new connection to handle the client
+    	ConnectionImpl c = new ConnectionImpl(myPort);
+    	c.myAddress = myAddress;
+    	c.remoteAddress = remoteAddress;
+    	c.remotePort = remotePort;
+    	c.state = State.ESTABLISHED;
+    	c.nextSequenceNo = nextSequenceNo;
+    	
+    	// Reset this connection object
+    	remoteAddress = null;
+    	remotePort = 0;    	
+    	state = State.CLOSED;
+    	next_seq_nr = -1;
+    	
+    	//System.err.println("SERVER: New connection ESABLISHED, original CLOSED");
+    	return c;    	
+    }
+
+    /**
+     * Send a message from the application.
+     * 
+     * @param msg
+     *            - the String to be sent.
+     * @throws ConnectException
+     *             If no connection exists.
+     * @throws IOException
+     *             If no ACK was received.
+     * @see AbstractConnection#sendDataPacketWithRetransmit(KtnDatagram)
+     * @see no.ntnu.fp.net.co.Connection#send(String)
+     */
+    public void send(String msg) throws ConnectException, IOException {
+    	if(state != State.ESTABLISHED) {
+    		throw new ConnectException("No connection");
+    	}
+    	
+    	KtnDatagram data, ack = null;
+    	
+    	// Construct data packet
+    	data = constructDataPacket(msg);
+    	
+    	// Send data
+        Timer timer = new Timer();
+        timer.scheduleAtFixedRate(new SendTimer(new ClSocket(), data), 0, RETRANSMIT);
+    
+        // Read ACK
+        try {
+	        long start = System.currentTimeMillis();
+	        while(ack == null && (System.currentTimeMillis()-start) < TIMEOUT) {
+	        	ack = receivePacket(true);
+	        	if(ack != null && (ack.getFlag() != Flag.ACK || ack.getAck() != data.getSeq_nr())) {
+	        		System.out.println("Dropped packet "+ack);
+	        		ack = null;
+	        	}
+	        }
+        } catch(EOFException e) {
+        	// FIN received, cancel send, enter CLOSE_WAIT and increment next_seq_nr
+        	// accounting for the FIN packet
+        	timer.cancel();
+        	next_seq_nr++;
+    		state = State.CLOSE_WAIT;
+    		close();
+        	throw new IOException("Remote end hung up", e);
+        }
+        timer.cancel();
+    	
+        // The data was not sent, no ACK received
+    	if(ack == null) {
+    		throw new IOException("No ACK received");
+    	}
+    }
+
+    /**
+     * Wait for incoming data.
+     * 
+     * @return The received data's payload as a String.
+     * @see Connection#receive()
+     * @see AbstractConnection#receivePacket(boolean)
+     * @see AbstractConnection#sendAck(KtnDatagram, boolean)
+     */
+    public String receive() throws ConnectException, IOException {
+    	// Make sure we're established
+    	if(state != State.ESTABLISHED) {
+    		throw new ConnectException("No connection");
+    	}
+    	try {
+	    	KtnDatagram ack, data = null;
+	    	
+	    	while(data == null) {
+	    		data = receivePacket(false);
+	    		if(data != null && !isValid(data)) {
+	    			System.err.println("Invalid data packet");
+	    			data = null;
+	    		}
+	    	}
+	    	
+	    	// ACK the packet and we're done
+	    	ack = constructInternalPacket(Flag.ACK);
+	    	ack.setAck(data.getSeq_nr());
+	    	lastSentAck = ack;
+	    	send(ack);
+	    	
+	    	return (String) data.getPayload();
+    	} catch(EOFException e) {
+    		// We might have dropped the ack, expect the next seq nr to be the
+    		// one after the FIN
+    		next_seq_nr = disconnectRequest.getSeq_nr() + 1;
+    		state = State.CLOSE_WAIT;
+    		close();
+        	throw new IOException("Remote end hung up", e);
+    	}
+    }
+
+    /**
+     * Close the connection.
+     * 
+     * @TODO There are more states that needs to be visited here
+     * 
+     * @see Connection#close()
+     */
+    public void close() throws IOException {  	
+    	KtnDatagram fin, ack = null;
+    	long start;
+    	
+    	// We're initializing the tear-down
+    	if(state == State.ESTABLISHED) {
+    		fin = constructInternalPacket(Flag.FIN);
+			state = State.FIN_WAIT_1;
+			
+			// Send FIN wait for ACK
+	        Timer timer = new Timer();
+	        timer.scheduleAtFixedRate(new SendTimer(new ClSocket(), fin), 0, RETRANSMIT);
+	    
+	        start = System.currentTimeMillis();
+	        while(ack == null && (System.currentTimeMillis()-start) < TIMEOUT) {
+	        	ack = receivePacket(true);
+	        	if(ack != null && (ack.getFlag() != Flag.ACK || ack.getAck() != fin.getSeq_nr())) {
+	        		ack = null;
+	        	}
+	        }
+	    	timer.cancel();
+			
+	    	// No ACK, assume error and 
+			if(ack == null)
+				throw new IOException("FIN was not ACK-ed, desination is gone");
+			
+			state = State.FIN_WAIT_2;
+			System.out.println("State changed FIN_WAIT_2");
+			
+			fin = null;
+			start = System.currentTimeMillis();
+	        while(fin == null && (System.currentTimeMillis()-start) < 4*TIMEOUT) {
+				fin = receivePacket(true);
+				if(fin != null && fin.getFlag() != Flag.FIN) {
+					System.out.println("FIN_WAIT_2: dropped non FIN packet");
+					fin = null;
+				}
+			}
+
+	        // Got no disconnect response, close down
+			if(fin == null) {
+				state = State.CLOSED;
+				throw new IOException("Got no response FIN");
+			}
+	        
+			disconnectRequest = fin;
+	    	state = State.TIME_WAIT;	    	
+    	}
+
+    	// ACK FIN packet
+    	disconnectSeqNo = disconnectRequest.getSeq_nr();
+    	ack = constructInternalPacket(Flag.ACK);
+		ack.setAck(disconnectSeqNo);
+		lastSentAck = ack;
+    	send(ack);    	
+    	
+    	// Read internal packets, if we get a duplicate FIN receivePacket will re-ACK
+    	fin = null;
+		start = System.currentTimeMillis();
+        while((System.currentTimeMillis()-start) < TIMEOUT) {
+			fin = receivePacket(true);
+		}
+    	
+        // If we're on the receiving end
+    	if(state == State.CLOSE_WAIT) {
+
+    		// Send our FIn wait for the last ACK
+	    	fin = constructInternalPacket(Flag.FIN);	    	
+	    	state = State.LAST_ACK;
+	    	
+	        Timer timer = new Timer();
+	        timer.scheduleAtFixedRate(new SendTimer(new ClSocket(), fin), 0, RETRANSMIT);
+	    	
+	    	ack = null;
+			start = System.currentTimeMillis();
+	    	while(ack == null && (System.currentTimeMillis()-start) < TIMEOUT) {
+				ack = receivePacket(true);
+				if(ack != null && ack.getFlag() == Flag.ACK && ack.getAck() == fin.getSeq_nr()) 
+					break;				
+				ack = null;	
+			}
+	    	timer.cancel();
+    		
+    	}
+    	    	
+    	// Close down
+    	state = State.CLOSED;
+    	remoteAddress = null;
+    	remotePort = 0;
+    }
+
+    /**
+     * Test a packet for transmission errors. This function should only called
+     * with data or ACK packets in the ESTABLISHED state.
+     * 
+     * @param packet
+     *            Packet to test.
+     * @return true if packet is free of errors, false otherwise.
+     */
+    protected boolean isValid(KtnDatagram packet) {
+    	return packet.getDest_addr().equals(myAddress) 
+    			&& packet.getDest_port() == myPort
+    			&& packet.getChecksum() == packet.calculateChecksum(); 
+    }
+    
+
     /**
      * Receive a packet
      * 
@@ -138,11 +423,21 @@ public class ConnectionImpl extends AbstractConnection {
      */
     @Override
     protected KtnDatagram receivePacket(boolean internal) throws IOException, ConnectException {
-    	System.out.println("receivePacket()");
     	KtnDatagram packet = super.receivePacket(internal);
     	
+    	// If we're waiting for a internal but got none, and there is a resent
+    	// data packet in the buffer -> resend the last ack before returning null
+    	if(internal && packet == null && !externalQueue.isEmpty()) {
+    		packet = externalQueue.get(0);
+    		if(lastSentAck != null && lastSentAck.getAck() == packet.getSeq_nr()) {
+    			send(lastSentAck);
+    			externalQueue.remove(0);
+    		}
+    		packet = null;
+    	}
+    	
+    	// Got packet, validate that this is the one we expect
     	if(packet != null) {
-    		System.out.println(packet.getSeq_nr() + " " + packet.getFlag());
     		// First packet, store new seq number
 	    	if(next_seq_nr == -1) {
 	    		next_seq_nr = packet.getSeq_nr(); 
@@ -158,14 +453,15 @@ public class ConnectionImpl extends AbstractConnection {
 	    	}
     	}
     	
+    	// Validate data packets
     	if(!internal && packet != null) {
     		// Null invalid data packets
     		if(!isValid(packet)) {
-    			System.out.println("Invalid data packet!");
     			packet = null;
     		}
     	}
     	
+    	// Increment expected seq number if we got a packet
     	if(packet != null)
     		next_seq_nr++;
     	
@@ -173,7 +469,7 @@ public class ConnectionImpl extends AbstractConnection {
     }
     
     /**
-     * Simply send packet
+     * Simply send packet, based on simplySendPacket
      * 
      * @param packet
      * @throws IOException
@@ -209,268 +505,5 @@ public class ConnectionImpl extends AbstractConnection {
             }
         }
         while (!sent && (tries-- > 0));
-    }
-
-    /**
-     * Listen for, and accept, incoming connections.
-     * 
-     * @return A new ConnectionImpl-object representing the new connection.
-     * @see Connection#accept()
-     */
-    public Connection accept() throws IOException, SocketTimeoutException {
-    	nextSequenceNo = 100;
-    	
-    	KtnDatagram syn = null, ack = null;
-    	
-    	state = State.LISTEN;
-    	
-    	// Keep listening till we get a SYN packet
-    	while(syn == null) {
-    		syn = receivePacket(true);
-    		
-    		if(syn != null && syn.getFlag() != Flag.SYN) {
-    			System.err.println("Dropped internal non-SYN packet in accept");
-    			syn = null;
-    		}
-    	}
-    	
-    	state = State.SYN_RCVD;
-    	remoteAddress = syn.getSrc_addr();
-    	remotePort = syn.getSrc_port();
-    	
-    	// SYN_ACK the SYN
-    	KtnDatagram synack = constructInternalPacket(Flag.SYN_ACK);
-    	synack.setAck(syn.getSeq_nr());
-        Timer timer = new Timer();
-        timer.scheduleAtFixedRate(new SendTimer(new ClSocket(), synack), 0, RETRANSMIT);
-    
-        // Read ack
-        long start = System.currentTimeMillis();
-        while(ack == null && (System.currentTimeMillis()-start) < TIMEOUT) {
-        	ack = receivePacket(true);
-        	if(ack != null && (ack.getFlag() != Flag.ACK || ack.getAck() != synack.getSeq_nr())) {
-        		System.out.println("dropped non ack");
-        		ack = null;
-        	}
-        }
-    	timer.cancel();
-    	
-    	if(ack == null)
-    		throw new SocketTimeoutException("Destination timed out");
-
-    	// Construct new connection to handle the client
-    	ConnectionImpl c = new ConnectionImpl(myPort);
-    	c.myAddress = myAddress;
-    	c.remoteAddress = remoteAddress;
-    	c.remotePort = remotePort;
-    	c.state = State.ESTABLISHED;
-    	c.nextSequenceNo = nextSequenceNo;
-    	
-    	// Reset this connection object
-    	remoteAddress = null;
-    	remotePort = 0;    	
-    	state = State.CLOSED;
-    	next_seq_nr = -1;
-    	
-    	System.err.println("SERVER: New connection ESABLISHED, original CLOSED");
-    	return c;
-    	
-    }
-
-    /**
-     * Send a message from the application.
-     * 
-     * @param msg
-     *            - the String to be sent.
-     * @throws ConnectException
-     *             If no connection exists.
-     * @throws IOException
-     *             If no ACK was received.
-     * @see AbstractConnection#sendDataPacketWithRetransmit(KtnDatagram)
-     * @see no.ntnu.fp.net.co.Connection#send(String)
-     */
-    public void send(String msg) throws ConnectException, IOException {
-    	if(state != State.ESTABLISHED)
-    		throw new ConnectException("No connection");
-    	
-    	KtnDatagram data, ack = null;
-    	
-    	// Construct data packet
-    	data = constructDataPacket(msg);
-    	
-    	// Send data
-        Timer timer = new Timer();
-        timer.scheduleAtFixedRate(new SendTimer(new ClSocket(), data), 0, RETRANSMIT);
-    
-        // Read ACK
-        try {
-	        long start = System.currentTimeMillis();
-	        while(ack == null && (System.currentTimeMillis()-start) < TIMEOUT) {
-	        	ack = receivePacket(true);
-	        	if(ack != null && (ack.getFlag() != Flag.ACK || ack.getAck() != data.getSeq_nr())) {
-	        		System.out.println("Dropped packet "+ack);
-	        		ack = null;
-	        	}
-	        }
-        } catch(EOFException e) {
-        	timer.cancel();
-        	next_seq_nr++;
-    		state = State.CLOSE_WAIT;
-    		close();
-        	throw new IOException("FIN received", e);
-        }
-        timer.cancel();
-    	
-    	// TODO Handle this better
-    	if(ack == null)
-    		throw new IOException("No ACK received");    	
-    }
-
-    /**
-     * Wait for incoming data.
-     * 
-     * @return The received data's payload as a String.
-     * @see Connection#receive()
-     * @see AbstractConnection#receivePacket(boolean)
-     * @see AbstractConnection#sendAck(KtnDatagram, boolean)
-     */
-    public String receive() throws ConnectException, IOException {
-    	try {
-	    	KtnDatagram ack, data = null;
-	    	
-	    	while(data == null) {
-	    		data = receivePacket(false);
-	    		if(data != null && !isValid(data)) {
-	    			System.err.println("Invalid data packet");
-	    			data = null;
-	    		}
-	    	}
-	    	
-	    	// ACK the packet and we're done
-	    	ack = constructInternalPacket(Flag.ACK);
-	    	ack.setAck(data.getSeq_nr());
-	    	lastSentAck = ack;
-	    	send(ack);
-	    	
-	    	return (String) data.getPayload();
-    	} catch(EOFException e) {
-    		next_seq_nr++; // Packet not read by readPacket(), make sure sequence number is incremented
-    		state = State.CLOSE_WAIT;
-    		close();
-    	}
-    	return null;
-    }
-
-    /**
-     * Close the connection.
-     * 
-     * @TODO There are more states that needs to be visited here
-     * 
-     * @see Connection#close()
-     */
-    public void close() throws IOException {  	
-    	KtnDatagram fin, ack = null;
-    	long start;
-    	
-    	// We're initializing the tear-down
-    	if(state == State.ESTABLISHED) {
-    		fin = constructInternalPacket(Flag.FIN);
-
-			state = State.FIN_WAIT_1;
-			
-			// SYN_ACK the SYN
-	        Timer timer = new Timer();
-	        timer.scheduleAtFixedRate(new SendTimer(new ClSocket(), fin), 0, RETRANSMIT);
-	    
-	        // Read ACK
-	        start = System.currentTimeMillis();
-	        while(ack == null && (System.currentTimeMillis()-start) < TIMEOUT) {
-	        	//System.out.println(ack);
-	        	ack = receivePacket(true);
-	        	if(ack != null && (ack.getFlag() != Flag.ACK || ack.getAck() != fin.getSeq_nr())) {
-	        		System.out.println("Dropped packet "+ack);
-	        		ack = null;
-	        	}
-	        }
-	    	timer.cancel();
-			
-			if(ack == null)
-				throw new IOException("FIN was not ACK-ed, desination is gone");
-			
-			state = State.FIN_WAIT_2;
-			System.out.println("State changed FIN_WAIT_2");
-			
-			fin = null;
-			start = System.currentTimeMillis();
-	        while(fin == null && (System.currentTimeMillis()-start) < 4*TIMEOUT) {
-				fin = receivePacket(true);
-				if(fin != null && fin.getFlag() != Flag.FIN) {
-					System.out.println("FIN_WAIT_2: dropped non FIN packet");
-					fin = null;
-				}
-			}
-
-			if(fin == null)
-				throw new IOException("Got no response FIN");
-	        
-			disconnectRequest = fin;
-
-	    	state = State.TIME_WAIT;
-	    	
-	    	System.out.println("State changed TIME_WAIT");
-	    	
-    	}
-    	
-    	disconnectSeqNo = disconnectRequest.getSeq_nr();
-    	ack = constructInternalPacket(Flag.ACK);
-		ack.setAck(disconnectSeqNo);
-		lastSentAck = ack;
-    	send(ack);    	
-    	
-    	fin = null;
-		start = System.currentTimeMillis();
-        while((System.currentTimeMillis()-start) < TIMEOUT) {
-			fin = receivePacket(true);
-		}
-    	
-    	if(state == State.CLOSE_WAIT) {
-
-	    	fin = constructInternalPacket(Flag.FIN);
-	    	
-	    	state = State.LAST_ACK;
-	    	
-	        Timer timer = new Timer();
-	        timer.scheduleAtFixedRate(new SendTimer(new ClSocket(), fin), 0, RETRANSMIT);
-	    	
-	    	ack = null;
-			start = System.currentTimeMillis();
-	    	while(ack == null && (System.currentTimeMillis()-start) < TIMEOUT) {
-				ack = receivePacket(true);
-				if(ack != null && ack.getFlag() == Flag.ACK && ack.getAck() == fin.getSeq_nr()) 
-					break;				
-				ack = null;	
-			}
-	    	timer.cancel();
-    		
-    	}
-    	    	
-    	System.out.println("State changed CLOSED");
-    	state = State.CLOSED;
-    	remoteAddress = null;
-    	remotePort = 0;
-    }
-
-    /**
-     * Test a packet for transmission errors. This function should only called
-     * with data or ACK packets in the ESTABLISHED state.
-     * 
-     * @param packet
-     *            Packet to test.
-     * @return true if packet is free of errors, false otherwise.
-     */
-    protected boolean isValid(KtnDatagram packet) {
-    	return packet.getDest_addr().equals(myAddress) 
-    			&& packet.getDest_port() == myPort
-    			&& packet.getChecksum() == packet.calculateChecksum(); 
     }
 }
