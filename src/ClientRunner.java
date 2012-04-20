@@ -14,7 +14,14 @@ import no.ntnu.fp.net.co.ConnectionImpl;
 public class ClientRunner {
 
 	public static void main(String[] args) throws Exception {
-		no.ntnu.fp.net.cl.FailureController.setError(false);
+		no.ntnu.fp.net.cl.FailureController.setError(true);
+		no.ntnu.fp.net.cl.FailureController.setDelay_prob(0.1);
+		no.ntnu.fp.net.cl.FailureController.setMaxDelay(1000);
+		no.ntnu.fp.net.cl.FailureController.setGhost_prob(0.02);
+		no.ntnu.fp.net.cl.FailureController.setLoss_prob(0.3);
+		no.ntnu.fp.net.cl.FailureController.setOnlyDataError(false);
+		no.ntnu.fp.net.cl.FailureController.setHeader_error_prob(0.05);
+		no.ntnu.fp.net.cl.FailureController.setPayload_error_prob(0.0);
 		new Client().start();
 	}
 	
@@ -28,8 +35,8 @@ class Client extends Thread {
 		String[] rec = new String[data.length];
 
 		try {
-			Connection socket = new ConnectionImpl(8001, "127.0.0.1");
-			socket.connect(InetAddress.getByName("127.0.0.1"), 8002);			
+			Connection socket = new ConnectionImpl(8001, "129.241.163.131");
+			socket.connect(InetAddress.getByName("78.91.3.24"), 8002);			
 			for(int i = 0; i < data.length; i++) {
 				socket.send(data[i]);	
 			}			
